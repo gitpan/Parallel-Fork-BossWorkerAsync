@@ -1,0 +1,28 @@
+Parallel-Fork-BossWorkerAsync version 0.01
+==========================================
+
+INSTALLATION
+
+To install this module type the following:
+
+   perl Makefile.PL
+   make
+   make test
+   make install
+
+Ignore the timeout warning during the alarm test.  It's what's supposed
+to happen.
+
+DEPENDENCIES
+
+This module requires these other modules and libraries:
+
+  Data::Dumper, Carp, IO::Select, Socket, Fcntl, POSIX
+
+COPYRIGHT AND LICENCE
+
+Copyright (C) 2009 by joe vannucci, <jvannucci@cpan.org>
+
+All rights reserved.  This library is free software; you can redistribute
+it and/or modify it under the same terms as Perl itself.
+
