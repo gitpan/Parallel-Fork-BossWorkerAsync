@@ -9,7 +9,7 @@ use POSIX        qw( WNOHANG WIFEXITED EINTR EWOULDBLOCK );
 use IO::Select ();
 
 our @ISA = qw();
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 # -----------------------------------------------------------------
 sub new {
