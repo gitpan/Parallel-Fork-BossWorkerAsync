@@ -9,7 +9,7 @@ use POSIX        qw( WNOHANG WIFEXITED EINTR EWOULDBLOCK );
 use IO::Select ();
 
 our @ISA = qw();
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 # -----------------------------------------------------------------
 sub new {
@@ -770,7 +770,7 @@ B<Parallel::Fork::BossWorkerAsync> received much inspiration from the fine L<Par
 
 =head1 BUGS
 
-Please report bugs to jvannucci@cpan.org.
+Please report bugs to jvann.cpan@gmail.com.
 
 Forked processes and threads don't mix well.  It's a good idea to construct Parallel::Fork::BossWorkerAsync before multiple threads are created.
 
@@ -782,7 +782,7 @@ Many thanks to Jeff Rodriguez for his module Parallel::Fork::BossWorker.
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2009 by joe vannucci, E<lt>jvannucci@cpan.orgE<gt>
+Copyright (C) 2009 by joe vannucci, E<lt>jvann.cpan@gmail.comE<gt>
 
 All rights reserved.  This library is free software; you can redistribute
 it and/or modify it under the same terms as Perl itself.

@@ -1,4 +1,4 @@
-Parallel-Fork-BossWorkerAsync version 0.01
+Parallel-Fork-BossWorkerAsync version 0.03
 ==========================================
 
 INSTALLATION
@@ -21,7 +21,7 @@ This module requires these other modules and libraries:
 
 COPYRIGHT AND LICENCE
 
-Copyright (C) 2009 by joe vannucci, <jvannucci@cpan.org>
+Copyright (C) 2009 by joe vannucci, <jvann.cpan@gmail.com>
 
 All rights reserved.  This library is free software; you can redistribute
 it and/or modify it under the same terms as Perl itself.
