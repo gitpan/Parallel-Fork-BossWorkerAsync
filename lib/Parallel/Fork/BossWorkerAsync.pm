@@ -9,7 +9,7 @@ use POSIX        qw( WNOHANG WIFEXITED EINTR EWOULDBLOCK );
 use IO::Select ();
 
 our @ISA = qw();
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 # -----------------------------------------------------------------
 sub new {
@@ -68,7 +68,7 @@ sub add_work {
   while (@jobs) {
     my $job = shift(@jobs);
     my $n = syswrite( $self->{boss_socket}, $self->serialize($job) );
-    croak("syswrite: $!") if ! defined($n);
+    croak("add_work: app write to boss: syswrite: $!") if ! defined($n);
     $self->{pending} ++;
   }
 }
@@ -406,7 +406,7 @@ sub write_app {
           # That's it for this socket, try another, or select again.
           return;
         } else {
-          croak("sysread: $!");
+          croak("boss write to app: syswrite: $!");
         }
       }
         
@@ -415,7 +415,7 @@ sub write_app {
         # Boss is supposed to close app socket before app.  App tells Boss to
         # stop, but it only happens after all existing work is completed, and
         # data is sent back to app.
-        croak("app socket closed prematurely");
+        croak("boss write to app: peer closed prematurely");
           
       } else {
         # wrote some bytes, remove them from the queue elem
@@ -459,7 +459,7 @@ sub write_worker {
         # That's it for this socket, try another, or select again.
         return;
       } else {
-        croak("sysread: $!");
+        croak("boss write to worker: syswrite: $!");
       }
     }
         
@@ -467,7 +467,7 @@ sub write_worker {
       # Application error: socket has been closed prematurely by other party.
       # Boss is supposed to close worker socket before worker - that's how
       # worker knows to exit.
-      croak("worker socket closed prematurely (pid " . $self->{workers}->{ $socket }->{pid} . ")");
+      croak("boss write to worker: peer closed prematurely (pid " . $self->{workers}->{ $socket }->{pid} . ")");
           
     } else {
       # wrote some bytes, remove them from the job
@@ -491,6 +491,19 @@ sub read {
   my $stream;
   $rstream = \$stream if ! defined($rstream);
   $$rstream = '' if ! defined($$rstream);
+
+  # croak messaging details...
+  my $source;
+  if ($iam eq 'boss') {
+    if ($socket == $self->{app_socket}) {
+      $source = 'app';
+    } else {
+      $source = "worker [$self->{workers}->{$socket}->{pid}]";
+    }
+  } else {    # app or worker, same source
+    $source = "boss";
+  }
+
   while ( 1 ) {
     my $n = sysread($socket, $$rstream, 1024, length($$rstream));
     if ( ! defined($n)) {
@@ -500,7 +513,7 @@ sub read {
       } elsif ($! == EWOULDBLOCK) {
         last;    # No bytes recd, no need to chunk.
       } else {
-        croak("sysread: $!");
+        croak("$iam read from $source: sysread: $!");
       }
           
     } elsif ($n == 0) {
@@ -514,12 +527,12 @@ sub read {
         if ($socket == $self->{app_socket}) {
           $self->{shutting_down} = 1;
         } elsif (exists($self->{workers}->{$socket})) {
-          croak("Boss: worker closed prematurely (pid " . $self->{workers}->{ $socket }->{pid} . ")");
+          croak("$iam read from $source: peer closed prematurely (pid " . $self->{workers}->{ $socket }->{pid} . ")");
         }
       } elsif ($iam eq 'worker') {
         close($socket);
       } else {    # i am app
-        croak("App: boss closed prematurely (pid " . $self->{boss_pid} . ")");
+        croak("$iam read from $source: peer closed prematurely (pid " . $self->{boss_pid} . ")");
       }
 
       # if we didn't croak...
@@ -581,7 +594,7 @@ sub worker_loop {
         # We have a result: write it to boss
         
         my $n = syswrite( $self->{socket}, $result_stream);
-        croak("syswrite: $!") if ! defined($n);
+        croak("worker [$$] write to boss: syswrite: $!") if ! defined($n);
         $result_stream = undef;
         # will return to top of loop
         
