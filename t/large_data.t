@@ -8,7 +8,16 @@ use Test::More tests => 3;
 BEGIN { use_ok('Parallel::Fork::BossWorkerAsync') };
 require_ok('Parallel::Fork::BossWorkerAsync');
 
-open(F, "< ./lib/Parallel/Fork/BossWorkerAsync.pm") or die $!;
+my $path;
+if (-e "./lib/Parallel/Fork/BossWorkerAsync.pm") {
+  $path = "./lib/Parallel/Fork/BossWorkerAsync.pm";
+} elsif (-e "../lib/Parallel/Fork/BossWorkerAsync.pm") {
+  $path = "../lib/Parallel/Fork/BossWorkerAsync.pm";
+} else {
+  diag("can't find large datafile: BossWorkerAsync.pm");
+  fail();
+}
+open(F, "< $path") or die $!;
 my $data = join('', <F>);
 close(F);
 

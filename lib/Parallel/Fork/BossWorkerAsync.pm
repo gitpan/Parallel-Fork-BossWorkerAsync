@@ -9,7 +9,7 @@ use POSIX        qw( WNOHANG WIFEXITED EINTR EWOULDBLOCK );
 use IO::Select ();
 
 our @ISA = qw();
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 
 # -----------------------------------------------------------------
 sub new {
@@ -204,6 +204,7 @@ sub start_boss {
       
       $self->start_workers();
       $self->boss_loop();
+      while (wait() != -1) {}
       exit;
     }
   };
@@ -609,7 +610,7 @@ sub worker_loop {
         my $result;
         eval {
           local $SIG{ALRM} = sub {
-            die("Work handler timed out");
+            die("BossWorkerAsync: timed out");
           };
 
           # Set alarm
@@ -622,9 +623,8 @@ sub worker_loop {
           alarm(0);
         };
 
-        # Warn on errors
         if ($@) {
-          carp("Worker $$ error: $@");
+          $result = {ERROR => $@};
         }
         
         $result_stream = $self->serialize($result);
@@ -647,23 +647,52 @@ Parallel::Fork::BossWorkerAsync - Perl extension for creating asynchronous forki
 
   use Parallel::Fork::BossWorkerAsync ();
   my $bw = Parallel::Fork::BossWorkerAsync->new(
-    work_handler => \&work
+    work_handler    => \&work,
+    result_handler  => \&handle_result,
+    global_timeout  => 2,
   );
 
   # Jobs are hashrefs
-  $bw->add_work( {key => 'value'} );
+  $bw->add_work( {a => 3, b => 4} );
   while ($bw->pending()) {
     my $ref = $bw->get_result();
+    if ($ref->{ERROR}) {
+      print STDERR $ref->{ERROR};
+    } else {
+      print "$ref->{product}\n";
+      print "$ref->{string}\n";
+    }
   }
   $bw->shut_down();
 
   sub work {
     my ($job)=@_;
-    # do something with hash ref $job
 
+    # Uncomment to test timeout
+    # sleep(3);
+    
+    # Uncomment to test worker error
+    # die("rattle");
+    
+    # do something with hash ref $job
+    my $c = $job->{a} * $job->{b};
+    
     # Return values are hashrefs
-    return { };
+    return { product => $c };
   }
+
+  sub handle_result {
+    my ($result)=@_;
+    if (exists($result->{product})) {
+      $result->{string} = "the answer is: $result->{product}";
+    }
+    return $result;
+  }
+
+  __END__
+  Prints:
+  12
+  the answer is: 12
 
 =head1 DESCRIPTION
 
@@ -690,70 +719,53 @@ Creates and returns a new Parallel::Fork::BossWorkerAsync object.
 
 =item * C<< work_handler => \&work_sub >>
   
-work_handler is the only required argument.  The sub is called with it's first
-and only argument being one of the values in the work queue. Each worker calls
-this sub each time it receives work from the boss process. The handler may trap
-$SIG{ALRM}, which may be called if global_timeout is specified.
+work_handler is the only required argument.  The sub is called with it's first and only argument being one of the values (hashrefs) in the work queue. Each worker calls this sub each time it receives work from the boss process. The handler may trap $SIG{ALRM}, which may be called if global_timeout is specified.
 
-The work_handler should clean up after itself, as the workers may call the
-work_handler more than once.
+The work_handler should clean up after itself, as the workers may call the work_handler more than once.
+
+The work_handler is expected to return a hashref.
 
 =item * C<< result_handler => \&result_sub >>
 
-The result_handler argument is optional, the sub is called with it's first
-and only argument being the return value of work_handler. The boss process
-calls this sub each time a worker returns data. This subroutine is not affected
-by the value of global_timeout.
+The result_handler argument is optional. The sub is called with it's first and only argument being the return value of work_handler, which is expected to be a hashref. If defined, the boss process calls this sub each time the application requests (and receives) a result. This handler is not timed out via $SIG{ALRM}.
+
+The result_handler is expected to return a hashref.
 
 =item * C<< init_handler => \&init_sub >>
 
-The init_handler argument is optional.  It accepts no arguments and has no
-return value.  It is called only once by each worker as it loads and before
-entering the job processing loop. This subroutine is not affected by the
-value of global_timeout.  This could be used to connect to a database, etc.
+The init_handler argument is optional.  It accepts no arguments and has no return value.  It is called only once by each worker as it loads and before entering the job processing loop. This subroutine is not affected by the value of global_timeout.  This could be used to connect to a database, etc.
 
 =item * C<< global_timeout => $seconds >>
 
-By default, a handler can execute forever. If global_timeout is specified, an
-alarm is setup to terminate the work_handler so processing can continue.
+By default, a handler can execute forever. If global_timeout is specified, an alarm is setup to terminate the work_handler so processing can continue.
 
 =item * C<< worker_count => $count >>
 
-By default, 3 workers are started to process the data queue. Specifying
-worker_count can scale the worker count to any number of workers you wish.
+By default, 3 workers are started to process the data queue. Specifying worker_count can scale the worker count to any number of workers you wish.
 
 =item * C<< msg_delimiter => $delimiter >>
 
-Sending messages to and from the child processes is accomplished using
-Data::Dumper. When transmitting data, a delimiter must be used to identify the
-breaks in messages. By default, this delimiter is "\0\0\0".  This delimiter may
-not appear in your data.
+Sending messages to and from the child processes is accomplished using Data::Dumper. When transmitting data, a delimiter must be used to identify the breaks in messages. By default, this delimiter is "\0\0\0".  This delimiter may not appear in your data.
 
 =head2 add_work(\%work)
 
-Adds work to the instance's queue.  It accepts a list of hash refs.  add_work() can
-be called at any time before shut_down().  All work can be added at the beginning,
-and then the results gathered, or these can be interleaved: add a few jobs, grab the
-results of one of them, add a few more, grab more results, etc.
+Adds work to the instance's queue.  It accepts a list of hash refs.  add_work() can be called at any time before shut_down().  All work can be added at the beginning, and then the results gathered, or these can be interleaved: add a few jobs, grab the results of one of them, add a few more, grab more results, etc.
 
-Note: Jobs are not guaranteed to be processed in the order they're added.  This is
-because they are farmed out to multiple workers running concurrently.
+Note: Jobs are not guaranteed to be processed in the order they're added.  This is because they are farmed out to multiple workers running concurrently.
 
   $bw->add_work({data => "my data"}, {data => "more stuff"}, ...);
 
 =head2 B<pending()>
 
-This simple function returns a true value if there are jobs that have been submitted
-for which the results have not yet been retrieved.
+This simple function returns a true value if there are jobs that have been submitted for which the results have not yet been retrieved.
 
-Note: This says nothing about the readiness of the results.  Just that at some point,
-now or in the future, the results will be available for collection.
+Note: This says nothing about the readiness of the results.  Just that at some point, now or in the future, the results will be available for collection.
 
   while ($bw->pending()) { }
 
 =head2 B<get_result()>
 
-Requests the next single available job result from the Boss' result queue.  Returns the return value of the work_handler.  If there is a result_handler defined, it's called here, and the return value of this function is returned instead.  Depending on what your work_handler, or result_handler, does, it may not be interesting to capture this result.
+Requests the next single available job result from the Boss' result queue.  Returns the return value of the work_handler.  If there is a result_handler defined, it's called here, and the return value of this function is returned instead.  Return from either function is expected to be a hashref. Depending on what your work_handler, or result_handler, does, it may not be interesting to capture this result.
 
 By default, get_result() is a blocking call.  If there are no completed job results available, main application processing will stop here and wait.
 
@@ -777,9 +789,16 @@ If you just want the Boss and Workers to go away, and don't care about work in p
 
   $bw->shut_down( force => 1 );
 
+=head2 B<Error handling>
+
+Errors generated by your work_handler do not cause the worker process to die. These are stuffed in the result hash with a key of 'ERROR'. The value is $@.
+
+If global_timeout is set, and a timeout occurs, the worker returns:
+  { ERROR => 'BossWorkerAsync: timed out' }
+
 =head1 SEE ALSO
 
-B<Parallel::Fork::BossWorkerAsync> received much inspiration from the fine L<Parallel::Fork::BossWorker>.  The main difference is that BossWorkerAsync introduces the Boss as a separate process, a bi-directional multiplexing, listening, queueing, server.  This allows the calling process much more freedom in interacting with, or ignoring, the Boss.
+B<Parallel::Fork::BossWorkerAsync> received inspiration from L<Parallel::Fork::BossWorker>.  The main difference is that BossWorkerAsync introduces the Boss as a separate process, a bi-directional multiplexing, listening, queueing, server.  This allows the calling process much more freedom in interacting with, or ignoring, the Boss.
 
 =head1 BUGS
 
@@ -787,11 +806,11 @@ Please report bugs to jvann.cpan@gmail.com.
 
 Forked processes and threads don't mix well.  It's a good idea to construct Parallel::Fork::BossWorkerAsync before multiple threads are created.
 
-I have no idea if this module will work on Windows.
+This module will probably not work on Windows due to its reliance on UNIX IPC mechanisms.
 
 =head1 CREDITS
 
-Many thanks to Jeff Rodriguez for his module Parallel::Fork::BossWorker.
+Thanks to Jeff Rodriguez for his module Parallel::Fork::BossWorker.
 
 =head1 COPYRIGHT AND LICENSE
 

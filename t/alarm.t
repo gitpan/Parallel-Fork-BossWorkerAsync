@@ -29,6 +29,7 @@ is($result, 2, "alarm");
 sub work {
   my ($job)=@_;
   my $counter=0;
+
   for (1..$job->{data}) {
     sleep(1);
     $counter++;
@@ -38,8 +39,12 @@ sub work {
 
 sub result {
   my ($r)=@_;
+  
   if ($r) {
-    $result += $r->{result};
+    if (exists($r->{ERROR}) && $r->{ERROR} =~ /timed out/) {
+    } else {
+      $result += $r->{result};
+    }
   }
   return $r;
 }

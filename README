@@ -10,9 +10,6 @@ To install this module type the following:
    make test
    make install
 
-Ignore the timeout warning during the alarm test.  It's what's supposed
-to happen.
-
 DEPENDENCIES
 
 This module requires these other modules and libraries:
