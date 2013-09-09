@@ -5,11 +5,14 @@ use Carp;
 use Data::Dumper qw( Dumper );
 use Socket       qw( AF_UNIX SOCK_STREAM PF_UNSPEC );
 use Fcntl        qw( F_GETFL F_SETFL O_NONBLOCK );
-use POSIX        qw( WNOHANG WIFEXITED EINTR EWOULDBLOCK );
+use POSIX        qw( EINTR EWOULDBLOCK );
 use IO::Select ();
 
 our @ISA = qw();
-our $VERSION = '0.06';
+our $VERSION = '0.07';
+
+# TO DO (wish list):
+# Restart crashed child workers.
 
 # -----------------------------------------------------------------
 sub new {
@@ -21,6 +24,8 @@ sub new {
     worker_count    => $attrs{worker_count}   || 3,         # optional, how many child workers
     global_timeout  => $attrs{global_timeout} || 0,         # optional, in seconds, 0 is unlimited
     msg_delimiter   => $attrs{msg_delimiter}  || "\0\0\0",  # optional, may not appear in data
+    read_size       => $attrs{read_size}      || 1024*1024, # optional, defaults to 1 MB
+    verbose         => $attrs{verbose}        || 0,         # optional, *undocumented*, 0=silence, 1=debug
     shutting_down   => 0,
     force_down      => 0,
     pending         => 0,
@@ -66,10 +71,12 @@ sub add_work {
   my ($self, @jobs)=@_;
   $self->blocking($self->{boss_socket}, 1);
   while (@jobs) {
+    $self->log("add_work: adding job to queue\n");
     my $job = shift(@jobs);
     my $n = syswrite( $self->{boss_socket}, $self->serialize($job) );
     croak("add_work: app write to boss: syswrite: $!") if ! defined($n);
     $self->{pending} ++;
+    $self->log("add_work: job added to queue, $self->{pending} pending\n");
   }
 }
 
@@ -91,7 +98,10 @@ sub get_result {
   my ($self, %args)=@_;
   $args{blocking} = 1 if ! defined($args{blocking});
   carp("get_result() when no results pending") if ! $self->pending();
-  
+
+  my $rq_count = scalar(@{ $self->{result_queue} });  
+  $self->log("get_result: $self->{pending} jobs in process, $rq_count results ready\n");
+
   if ( ! @{ $self->{result_queue} }) {
     $self->blocking($self->{boss_socket}, $args{blocking});
     $self->read($self->{boss_socket}, $self->{result_queue}, \$self->{result_stream}, 'app');
@@ -102,8 +112,11 @@ sub get_result {
     }
   }
 
+  $self->log("get_result: got result\n");
+
   $self->{pending} --;
   if ($self->{pending} == 0  &&  $self->{shutting_down}) {
+    $self->log("get_result: no jobs pending; closing boss\n");
     close($self->{boss_socket});
   }
   my $ref = $self->deserialize( shift( @{ $self->{result_queue} } ) );
@@ -133,7 +146,9 @@ sub shut_down {
   my ($self, %args)=@_;
   $args{force} ||= 0;
   $self->{shutting_down} = 1;
-  
+
+  $self->log("shut_down: MARK\n");
+
   if ($args{force}) {
     # kill boss pid
     kill(9, $self->{boss_pid});
@@ -142,14 +157,8 @@ sub shut_down {
   } else {
     close($self->{boss_socket});
   }
-}
 
-# -----------------------------------------------------------------
-sub reaper {
-  while ( (my $pid = waitpid(-1, WNOHANG)) > 0) {
-    #carp("Child $pid exited") if WIFEXITED($?);
-  }
-  $SIG{CHLD} = \&reaper;
+  while (wait() != -1) {};		# waits/reaps Boss process
 }
 
 # -----------------------------------------------------------------
@@ -176,21 +185,25 @@ sub blocking {
 # -----------------------------------------------------------------
 sub start_boss {
   my ($self)=@_;
+  $self->log("start_boss: start\n");
   eval {
-    $SIG{CHLD} = \&reaper;
     my ($b1, $b2);
     socketpair($b1, $b2, AF_UNIX, SOCK_STREAM, PF_UNSPEC)
       or die("socketpair: $!");
 
-    if (my $pid = fork()) {
-      confess("fork failed: $!") if $pid < 0;
+    my $pid = fork();
+    defined $pid || confess("fork failed: $!");
+
+    if ($pid) {
       # Application (parent)
       $self->{boss_pid} = $pid;
 
       # App won't write to, or read from itself.
       close($b2);
       $self->{boss_socket} = $b1;
-      
+
+      $self->log("start_boss: Application: Boss started\n");
+
     } else {
       # Manager aka Boss (child)
       # Boss won't write to, or read from itself.
@@ -204,7 +217,9 @@ sub start_boss {
       
       $self->start_workers();
       $self->boss_loop();
-      while (wait() != -1) {}
+      while (wait() != -1) {};			# waits/reaps workers only
+
+      $self->log("start_boss: Boss: exiting\n");
       exit;
     }
   };
@@ -216,16 +231,17 @@ sub start_boss {
 # -----------------------------------------------------------------
 sub start_workers {
   my ($self)=@_;
+  $self->log("start_workers: starting $self->{worker_count} workers\n");
   eval {
-    $SIG{CHLD} = \&reaper;
-    
     for (1 .. $self->{worker_count}) {
       my ($w1, $w2);
       socketpair($w1, $w2, AF_UNIX, SOCK_STREAM, PF_UNSPEC)
         or die("socketpair: $!");
       
-      if (my $pid = fork()) {
-        confess("fork failed: $!") if $pid < 0;
+      my $pid = fork();
+      defined $pid || confess("fork failed: $!");
+
+      if ($pid) {
         # Boss (parent)
         close($w2);
         $self->{workers}->{ $w1 } = { pid => $pid, socket => $w1 };
@@ -245,6 +261,8 @@ sub start_workers {
         exit;
       }
     }
+
+    $self->log("start_workers: start workers complete\n");
   };
   if ($@) {
     croak($@);
@@ -266,6 +284,8 @@ sub start_workers {
 
 sub boss_loop {
   my ($self)=@_;
+
+  $self->log("boss_loop: start\n");
   eval {
     # handy
     my $workers = $self->{workers};
@@ -363,13 +383,17 @@ sub boss_loop {
           $queue = $self->{job_queue};
           $rstream = \$self->{job_stream};
         }
-        
+
+        $self->log("boss_loop: reading socket\n");        
         $self->read($rh, $queue, $rstream, 'boss');
+        $self->log("boss_loop: read socket complete\n");
       }
 
       for my $wh (@$w) {
         my $source = exists($workers->{ $wh }) ? $workers->{ $wh }->{pid} : "app";
+        $self->log("boss_loop: writing socket\n");
         $self->write($wh);
+        $self->log("boss_loop: write socket complete\n");
       }
     }
   };
@@ -399,6 +423,7 @@ sub write_app {
   # the previous write attempt.
   my $queue = $self->{result_queue};
   while (@$queue) {
+    $self->log("write_app: processing queue entry\n");
     while ( $queue->[0] ) {
       my $n = syswrite($socket, $queue->[0]);
       if ( ! defined($n)) {
@@ -424,8 +449,10 @@ sub write_app {
       }
     }
     # queue elem is empty, remove it, go try next one
+    $self->log("write_app: process queue entry complete\n");
     shift(@$queue);
   }
+  $self->log("write_app: all queue entries have been written\n");
   # queue is empty, all written!
 }
  
@@ -442,6 +469,7 @@ sub write_worker {
   # Once job send is complete, mark worker not-idle.
   
   if ( ! exists($self->{workers}->{ $socket }->{partial_job})) {
+    $self->log("write_worker: processing new job\n");
     if (@{ $self->{job_queue} }) {
       $self->{workers}->{ $socket }->{partial_job} = shift(@{ $self->{job_queue} });
     } else {
@@ -449,10 +477,13 @@ sub write_worker {
       # even if there's only one job on the queue.
       return;
     }
+  } else {
+    $self->log("write_worker: processing job remnant\n");
   }
   my $rjob = \$self->{workers}->{ $socket }->{partial_job};
   
   while ( length($$rjob) ) {
+    $self->log("write_worker: writing...\n");
     my $n = syswrite($socket, $$rjob);
     if ( ! defined($n)) {
       # Block or real socket error
@@ -473,9 +504,11 @@ sub write_worker {
     } else {
       # wrote some bytes, remove them from the job
       substr($$rjob, 0, $n) = '';
+      $self->log("write_worker: wrote $n bytes\n");
     }
   }
   # job all written!
+  $self->log("write_worker: job complete\n");
   delete($self->{workers}->{ $socket }->{partial_job});
   $self->{workers}->{ $socket }->{idle} = 0;
 }
@@ -506,7 +539,9 @@ sub read {
   }
 
   while ( 1 ) {
-    my $n = sysread($socket, $$rstream, 1024, length($$rstream));
+    $self->log("read: $iam is reading...\n");
+
+    my $n = sysread($socket, $$rstream, $self->{read_size}, length($$rstream));
     if ( ! defined($n)) {
       if ($! == EINTR) {
         # signal interrupt, continue reading
@@ -542,7 +577,7 @@ sub read {
     } else {
       # We actually read some bytes.  See if we can chunk
       # out any record(s).
-      
+      $self->log("read: $iam read $n bytes\n");
       
       # Split on delimiter
       my @records = split(/(?<=$self->{msg_delimiter})/, $$rstream);
@@ -555,6 +590,7 @@ sub read {
       if ($records[ $#records ] =~ /$self->{msg_delimiter}$/) {
         # We have a full record
         $rcount++;
+        $self->log("read: $iam pushing full record onto queue\n");
         push(@$queue, $records[ $#records ]);
         $$rstream = '';
         if (exists($self->{workers}->{ $socket })) {
@@ -584,18 +620,21 @@ sub read {
 sub worker_loop {
   my ($self)=@_;
   eval {
-    $SIG{CHLD} = 'IGNORE';
+    if ($self->{init_handler}) {
+      $self->log("worker_loop: calling init_handler()\n");
+      $self->{init_handler}->();
+    }
 
-    $self->{init_handler}->()  if $self->{init_handler};
-    
     # String buffers to store serialized data: in and out.
     my $result_stream;
     while ( 1 ) {
       if (defined($result_stream)) {
         # We have a result: write it to boss
+        $self->log("worker_loop: writing result...\n");
         
         my $n = syswrite( $self->{socket}, $result_stream);
         croak("worker [$$] write to boss: syswrite: $!") if ! defined($n);
+        $self->log("worker_loop: wrote $n bytes\n")       if defined($n);
         $result_stream = undef;
         # will return to top of loop
         
@@ -603,9 +642,11 @@ sub worker_loop {
         # Get job from boss
         
         my @queue;
+        $self->log("worker_loop: reading job from queue...\n");
         $self->read($self->{socket}, \@queue, undef, 'worker');
         return if ! @queue;
-        
+        $self->log("worker_loop: read job complete, we have a job\n");
+
         my $job = $self->deserialize($queue[0]);
         my $result;
         eval {
@@ -617,6 +658,7 @@ sub worker_loop {
           alarm($self->{global_timeout});
 
           # Invoke handler and get result
+          $self->log("worker_loop: calling work_handler for this job\n");
           $result = $self->{work_handler}->($job);
 
           # Disable alarm
@@ -625,6 +667,7 @@ sub worker_loop {
 
         if ($@) {
           $result = {ERROR => $@};
+          $self->log("worker_loop: ERROR: $@\n");
         }
         
         $result_stream = $self->serialize($result);
@@ -635,6 +678,16 @@ sub worker_loop {
     croak($@);
   }
 }
+
+
+# -----------------------------------------------------------------
+# IN: log message
+# If verbose is enabled, print the message.
+sub log {
+  my ($self, $msg) = @_;
+  print STDERR $msg   if $self->{verbose};
+}
+
 
 1;
 __END__
@@ -676,6 +729,7 @@ Parallel::Fork::BossWorkerAsync - Perl extension for creating asynchronous forki
     
     # do something with hash ref $job
     my $c = $job->{a} * $job->{b};
+
     
     # Return values are hashrefs
     return { product => $c };
@@ -696,9 +750,11 @@ Parallel::Fork::BossWorkerAsync - Perl extension for creating asynchronous forki
 
 =head1 DESCRIPTION
 
-Parallel::Fork::BossWorkerAsync implements a multiprocess preforking server.  On construction, the current process forks a "Boss" process (the server), which then forks one or more "Worker" processes.  The Boss acts as a manager, accepting jobs from the main process, queueing and passing them to the next available idle Worker.  The Boss then listens for, and collects any responses from the Workers as they complete jobs, queueing them for the main process.  At any time, the main process can collect available responses from the Boss.
+Parallel::Fork::BossWorkerAsync is a multiprocess preforking server.  On construction, the current process forks a "Boss" process (the server), which then forks one or more "Worker" processes.  The Boss acts as a manager, accepting jobs from the main process, queueing and passing them to the next available idle Worker.  The Boss then listens for, and collects any responses from the Workers as they complete jobs, queueing them for the main process.
 
-Having a separate Boss process allows the main application to behave asynchronously with respect to the queued work.  Also, since the Boss is acting as a server, the application can send it more work at any time.
+The main process can collect available responses from the Boss, and/or send it more jobs, at any time. While waiting for jobs to complete, the main process can enter a blocking wait loop, or do something else altogether, opting to check back later.
+
+In general, it's a good idea to construct the object early in a program's life, before any threads are spawned, and before much memory is allocated, as the Boss, and each Worker will inherit the memory footprint.
 
 =head1 METHODS
 
@@ -712,7 +768,8 @@ Creates and returns a new Parallel::Fork::BossWorkerAsync object.
     init_handler    => \&init_sub,
     global_timeout  => 0,
     worker_count    => 3,
-    msg_delimiter   => "\0\0\0"
+    msg_delimiter   => "\0\0\0",
+    read_size       => 1024 * 1024,
   );
 
 =over 4
@@ -733,7 +790,7 @@ The result_handler is expected to return a hashref.
 
 =item * C<< init_handler => \&init_sub >>
 
-The init_handler argument is optional.  It accepts no arguments and has no return value.  It is called only once by each worker as it loads and before entering the job processing loop. This subroutine is not affected by the value of global_timeout.  This could be used to connect to a database, etc.
+The init_handler argument is optional.  The referenced function receives no arguments and returns nothing.  It is called only once by each worker, just after it's forked off from the boss, and before entering the job processing loop. This subroutine is not affected by the value of global_timeout.  This could be used to connect to a database, instantiate a non-shared object, etc.
 
 =item * C<< global_timeout => $seconds >>
 
@@ -746,6 +803,14 @@ By default, 3 workers are started to process the data queue. Specifying worker_c
 =item * C<< msg_delimiter => $delimiter >>
 
 Sending messages to and from the child processes is accomplished using Data::Dumper. When transmitting data, a delimiter must be used to identify the breaks in messages. By default, this delimiter is "\0\0\0".  This delimiter may not appear in your data.
+
+=item * C<< read_size => $number_of_bytes >>
+
+The default read buffer size is 1 megabyte. The application, the boss, and each worker all sysread() from their respective socket connections. Ideally, the read buffer is just large enough to hold all the data that's ready to read. Depending on your application, the default might be ridiculously large, if for example you only pass lookup keys in, and error codes out. If you're running in a memory-constrained environment, you might lower the buffer significantly, perhaps to 64k (1024 * 64), or all the way down to 1k (1024 bytes). If for example you're passing (copying) high resolution audio/video, you will likely benefit from increasing the buffer size. 
+
+An issue has cropped up, reported in more detail under the Bugs section below. Regardless of how large you set the read buffer with this parameter, BSD ignores this, and uses 8192 bytes instead. This can be a big problem if you pass megs of data back and forth, resulting in so many small reads tha the application appears to hang. It will eventually complete, but it's not pretty. Bottom line: don't pass huge chunks of data cross-process under BSD.
+
+=back
 
 =head2 add_work(\%work)
 
@@ -796,25 +861,27 @@ Errors generated by your work_handler do not cause the worker process to die. Th
 If global_timeout is set, and a timeout occurs, the worker returns:
   { ERROR => 'BossWorkerAsync: timed out' }
 
-=head1 SEE ALSO
-
-B<Parallel::Fork::BossWorkerAsync> received inspiration from L<Parallel::Fork::BossWorker>.  The main difference is that BossWorkerAsync introduces the Boss as a separate process, a bi-directional multiplexing, listening, queueing, server.  This allows the calling process much more freedom in interacting with, or ignoring, the Boss.
-
 =head1 BUGS
 
 Please report bugs to jvann.cpan@gmail.com.
 
-Forked processes and threads don't mix well.  It's a good idea to construct Parallel::Fork::BossWorkerAsync before multiple threads are created.
-
 This module will probably not work on Windows due to its reliance on UNIX IPC mechanisms.
+
+The Boss and Worker processes are long-lived. There is no restart mechanism for processes that exit prematurely. If it's the Boss, you're dead anyway, but if it's one or more Workers, the app will continue running, but throughput will suck. 
+
+The code should in some way overcome the tiny socket buffer limitations of BSD operating systems. Unbuffered reads are limited to 8192 byte chunks. If you pass megabytes of data with each job, the processing will not fail, but it will seem to be hung -- it can get VERY slow! This is not an issue on Linux, and will not be a problem on BSD if you pass less then say, 64k, between processes. If you know how to force an unbuffered socket read to use an arbitrarily large buffer (1 megabyte, for example), please shoot me an email.
 
 =head1 CREDITS
 
-Thanks to Jeff Rodriguez for his module Parallel::Fork::BossWorker.
+I'd like to thank everyone who has reported a bug, asked a question, or offered a suggestion.
+
+Jeff Rodriguez: wrote the module Parallel::Fork::BossWorker, which inspired this module.
+
+Rob Navarro: reported -- and fixed! -- errors in fork() error handling, and in the reaping of dead child processes.
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2009 by joe vannucci, E<lt>jvann.cpan@gmail.comE<gt>
+Copyright (C) 2009-2013 by joe vannucci, E<lt>jvann.cpan@gmail.comE<gt>
 
 All rights reserved.  This library is free software; you can redistribute
 it and/or modify it under the same terms as Perl itself.

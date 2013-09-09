@@ -10,6 +10,13 @@ To install this module type the following:
    make test
    make install
 
+NOTE: on BSD systems you probably don't want to run the test t/large_return.t. It takes
+nine minutes on my Darwin 12.4.0 (Mountain Lion) Mac. The problem is the 8k limit on
+the socket read buffer, enforced by the OS. It's only an issue on BSD, and if you're
+passing megabyte chunks of data between processes. More details in the man page.
+
+To avoid the test, simply move t/large_return.t to another directory.
+
 DEPENDENCIES
 
 This module requires these other modules and libraries:
