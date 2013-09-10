@@ -1,5 +1,8 @@
 Revision history for Perl extension Parallel::Fork::BossWorkerAsync.
 
+0.08 2013-09-09
+  - Remove large_return.t from the build, so as not to break BSD builds.
+
 0.07 2013-09-05
   - Optimize socket read buffer size; make it configurable.
   - Fix incorrect C-style fork() error return (perl returns undef, not -1).

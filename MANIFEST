@@ -7,6 +7,5 @@ t/alarm.t
 t/delim.t
 t/end-to-end.t
 t/large_data.t
-t/large_return.t
 t/nonblocking.t
 META.yml                                 Module meta-data (added by MakeMaker)

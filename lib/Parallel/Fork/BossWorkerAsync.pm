@@ -9,7 +9,7 @@ use POSIX        qw( EINTR EWOULDBLOCK );
 use IO::Select ();
 
 our @ISA = qw();
-our $VERSION = '0.07';
+our $VERSION = '0.08';
 
 # TO DO (wish list):
 # Restart crashed child workers.
